@@ -1,0 +1,240 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+\usepackage{geometry}
+\geometry{a4paper, margin=2.54cm}
+\usepackage{titling}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{listings}
+\usepackage{booktabs}
+
+\begin{document}
+
+% --- PORTADA ---
+\begin{titlepage}
+\centering
+
+\begin{tabular}{c c c}
+    \includegraphics[width=2.2cm]{logoUC.png}
+    &
+    \begin{tabular}{c}
+        \small\textbf{UNIVERSIDAD DE CARABOBO} \\
+        \small\textbf{FACULTAD DE CIENCIAS Y TECNOLOGÍA} \\
+        \small\textbf{ESCUELA DE COMPUTACIÓN} \\
+        \small\textbf{CAMPUS BÁRBULA} \\
+        \small\textbf{ARQUITECTURA DEL COMPUTADOR}
+    \end{tabular}
+    &
+    \includegraphics[width=2.2cm]{logofacyt.png}
+\end{tabular}
+
+\vspace{5cm}
+
+{\Large\bfseries Practica de Laboratorio 3: Entrada/Salida Mapeada en Memoria en MIPS32}
+
+\vspace{4cm}
+
+{\normalsize Bárbula, octubre de 2026}
+
+\vfill
+
+\begin{flushright}
+
+Daniel Gutierrez CI: 32047059
+
+Gabriel Diaz CI: 31161550
+\end{flushright}
+
+\end{titlepage}
+
+\newpage
+
+% --- 1. EL PROBLEMA ---
+\section{El Problema}
+En la arquitectura de computadores, el diseño de la memoria caché es un factor determinante para mitigar la brecha de velocidad entre el procesador y la memoria principal. Uno de los parámetros de diseño más críticos es el \textbf{tamaño de la línea de caché} (o tamaño de bloque). 
+
+El problema central radica en el principio de \textit{localidad espacial}. Aumentar el tamaño de la línea permite que, ante un fallo de caché, se traigan más datos adyacentes desde la memoria principal, previendo que el procesador los necesitará pronto. Sin embargo, un tamaño de línea excesivamente grande genera dos efectos negativos: primero, incrementa severamente la penalización por fallo (el tiempo que tarda el bus en transferir un bloque grande); segundo, reduce la cantidad total de líneas que caben en la caché, lo que provoca que datos útiles sean expulsados prematuramente, un fenómeno conocido como \textit{contaminación de caché}.
+
+El objetivo de este proyecto es simular y analizar empíricamente cómo la variación de este tamaño de línea afecta las métricas críticas del sistema, específicamente la Tasa de Aciertos (Hit Rate) y el Tiempo Medio de Acceso a Memoria (AMAT).
+
+% --- 2. TÉCNICAS COMPUTACIONALES ---
+\section{Técnicas Computacionales para su Solución}
+Para la simulación del hardware se desarrolló una herramienta en \textbf{C++11}, compilada mediante \texttt{GCC} en un entorno GNU/Linux. El modelo emplea programación orientada a objetos para encapsular la jerarquía de memoria y estructuras de datos dinámicas de la STL (\texttt{std::vector}) para representar los conjuntos y vías de la caché.
+
+Las técnicas algorítmicas clave implementadas son:
+\begin{itemize}
+    \item \textbf{Decodificación a nivel de Bits:} Para simular el hardware real, el simulador extrae el Índice y la Etiqueta (Tag) de cada dirección de memoria (representada en enteros de 64 bits) utilizando operadores de corrimiento a la derecha (\texttt{>>}) y enmascaramiento lógico AND (\texttt{\&}).
+    \item \textbf{Política de Reemplazo LRU (Least Recently Used):} Se implementó un "reloj global" que se incrementa en cada acceso a memoria. Cada línea de caché almacena una marca de tiempo. Ante un fallo en un conjunto lleno, el algoritmo busca linealmente y reemplaza la vía con la marca de tiempo más baja.
+\end{itemize}
+
+\subsection{Definición y explicación de Algoritmos y estructuras}
+En el presente proyecto se optó por el uso de diferentes tipos de estructuras de datos y algoritmos para la representación y conceptualización de la forma en que la memoria caché gestiona sus datos e interactúa con distintas direcciones de memoria.
+
+La estructura que representa la línea de la caché sería:
+\begin{verbatim}
+struct LineaCache {    
+    bool valida = false;    
+    uint64_t tag = 0;    
+    uint64_t contador_lru = 0;
+};
+\end{verbatim}
+
+Una línea es la unidad mínima de almacenamiento utilizada en la memoria caché; en ella se almacena un dato proveniente de la RAM. Funciona como un casillero.
+
+La variable \texttt{valida} es utilizada para validar la disponibilidad de la casilla, se usa más que nada para los algoritmos de búsqueda y reemplazo, como cuando ocurren misses. La variable \texttt{contador\_lru} es la marca de tiempo para la política de reemplazo. 
+
+El siguiente es \texttt{tag}, es el identificador único que utilizan los datos en el programa. Representa los bits más significativos (a la izquierda) de la dirección de memoria, los cuales se obtienen mediante desplazamientos de bits que se explican más adelante en el algoritmo principal del presente proyecto.
+
+\textbf{Las vías y los conjuntos:}
+Un conjunto de líneas actúa como una red de casilleros que almacenan datos independientes.
+\begin{verbatim}
+struct ConjuntoCache{    
+    vector<LineaCache> lineas;
+};
+\end{verbatim}
+\texttt{ConjuntoCache} contiene el vector de líneas, donde el tamaño de dicho vector (la cantidad de líneas por conjunto) representa el número de vías de la memoria caché.
+
+\textbf{¿Cómo se decodifican los bits de la dirección?}
+La dirección de memoria apunta a nivel de un byte individual, pero la caché no trae bytes sueltos, trae bloques enteros (el tamaño de línea).
+
+\textit{Paso 1: Cortar el "Offset" (Ignorar los bits de abajo)}
+\begin{verbatim}
+uint64_t direccion_desplazada = direccion >> bits_offset;
+\end{verbatim}
+El operador \texttt{>> bits\_offset} empuja todos los bits hacia la derecha, botando por la borda los bits del offset. Ya nos libramos de ellos.
+
+\textit{Paso 2: Aislar el "Index" (El número de fila exacta)}
+Una vez que quitamos el offset, los siguientes bits de la derecha son el Index (el número de la fila o conjunto al que debemos ir). Pero claro, después del Index todavía quedan los bits del Tag hacia la izquierda. Si usaras el número completo, te saldrías del tamaño de tu vector y daría un error de memoria (Segmentation Fault). Para evitarlo, se usa una máscara de bits (\texttt{\&}).
+\begin{verbatim}
+uint64_t index = (direccion >> bits_offset) & mascara_index;
+\end{verbatim}
+¿Qué hace la operación \texttt{\& mascara\_index}? Funciona como un filtro de aduana. Deja pasar únicamente los bits que coinciden con el índice y apaga (vuelve cero) todo lo demás hacia la izquierda.
+
+\textit{Paso 3: El salto directo al vector (\texttt{conjuntos[index]})}
+El resultado de esa operación matemática (index) es simplemente un número entero normal y corriente (por ejemplo, 5, 12 o 128). Como tu vector principal de conjuntos fue creado con un tamaño exacto (por ejemplo, 256 conjuntos), ese número de índice encaja perfectamente como la posición del vector:
+\begin{verbatim}
+ConjuntoCache& conjunto = conjuntos[index];
+\end{verbatim}
+Si el cálculo dio 5, el programa hace \texttt{conjuntos[5]} y salta de manera instantánea a la fila 5 de tu matriz de vectores, ignorando por completo las demás filas.
+
+\textbf{Algoritmo principal}
+\begin{verbatim}
+// PASO 1: Descomponer la dirección de memoria
+1.1. Calcular el INDEX:      
+     index = (direccion >> bits_offset) & mascara_index
+1.2. Calcular el TAG:      
+     tag = direccion >> (bits_offset + bits_index)
+
+// PASO 2: Ir a la fila correspondiente en la matriz de conjuntos
+2.1. Seleccionar el conjunto exacto:      
+     conjunto_actual = vector_conjuntos[index]
+
+// PASO 3: Buscar si hay un HIT (Acierto)
+3.1. Recorrer cada vía (línea) dentro de 'conjunto_actual':      
+     PARA CADA linea EN conjunto_actual.lineas HACER           
+          SI (linea.valida == VERDADERO) Y (linea.tag == tag) ENTONCES                
+                // ¡Lo encontramos! Es un Hit                
+                hits = hits + 1                
+                reloj_global = reloj_global + 1                
+                linea.contador_lru = reloj_global                
+                RETORNAR  // Fin del proceso para esta dirección          
+          FIN SI      
+     FIN PARA
+
+// PASO 4: Si el bucle terminó y no retornó, ocurrió un MISS (Fallo)
+4.1. Registrar el fallo:      
+     misses = misses + 1      
+     indice_reemplazo = -1
+4.2. Buscar si hay una vía libre (vacía) en el conjunto:      
+     PARA i DESDE 0 HASTA (tamaño_vias - 1) HACER           
+          SI (conjunto_actual.lineas[i].valida == FALSO) ENTONCES                
+                indice_reemplazo = i                
+                ROMPER BUCLE          
+          FIN SI      
+     FIN PARA
+4.3. Si el conjunto está lleno (no hay vías libres), aplicar LRU:
+     SI (indice_reemplazo == -1) ENTONCES          
+          lru_mas_viejo = conjunto_actual.lineas[0].contador_lru          
+          indice_reemplazo = 0                    
+          PARA i DESDE 1 HASTA (tamaño_vias - 1) HACER                
+                SI (conjunto_actual.lineas[i].contador_lru < lru_mas_viejo) ENTONCES                    
+                     lru_mas_viejo = conjunto_actual.lineas[i].contador_lru                    
+                     indice_reemplazo = i                
+                FIN SI          
+          FIN PARA      
+     FIN SI
+
+// PASO 5: Rellenar la vía elegida (ya sea libre o la que expulsó el LRU)
+5.1. Actualizar los datos de la línea:      
+     reloj_global = reloj_global + 1      
+     conjunto_actual.lineas[indice_reemplazo].valida = VERDADERO      
+     conjunto_actual.lineas[indice_reemplazo].tag = tag      
+     conjunto_actual.lineas[indice_reemplazo].contador_lru = reloj_global
+\end{verbatim}
+
+% --- 3. ANÁLISIS DE RESULTADOS ---
+\section{Metodología de la Prueba}
+Para evaluar el comportamiento de la memoria caché bajo distintas configuraciones de diseño, se sometió el simulador (configurado con una capacidad total de \textbf{32 KB} y asociatividad de \textbf{4 vías}) a un archivo de trazas (\texttt{trace\_grande.txt}) estructurado con miles de accesos que combinan recorridos secuenciales locales y saltos dinámicos en memoria.
+
+Se evaluaron tres tamaños de línea de caché distintos:
+\begin{itemize}
+    \item \textbf{16 bytes}
+    \item \textbf{64 bytes}
+    \item \textbf{128 bytes}
+\end{itemize}
+
+La evaluación se midió a través de tres métricas fundamentales:
+\begin{enumerate}
+    \item \textbf{Tasa de Aciertos (\textit{Hit Rate}):} Porcentaje de accesos encontrados directamente en la caché.
+    \item \textbf{Tasa de Fallos (\textit{Miss Rate}):} Porcentaje de accesos que requirieron buscar el bloque en niveles inferiores de memoria.
+    \item \textbf{Tiempo Medio de Acceso a Memoria (\textit{AMAT}):} Métrica de rendimiento calculada mediante la fórmula estándar:
+    \[
+    \text{AMAT} = \text{Tiempo de acierto} + (\text{Miss Rate} \times \text{Penalización por fallo})
+    \]
+\end{enumerate}
+
+\section{Resultados Obtenidos}
+En la Tabla~\ref{tab:resultados} se sintetizan los datos recolectados tras la ejecución en lote sobre la traza de prueba.
+
+\begin{table}[h!]
+\centering
+\caption{Tabla Comparativa de Rendimiento del Simulador.}
+\label{tab:resultados}
+\vspace{0.2cm}
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Tamaño de Línea} & \textbf{Hit Rate (\%)} & \textbf{Miss Rate (\%)} & \textbf{AMAT (ciclos)} \\
+\midrule
+\textbf{16 bytes}  & 67.24 & 32.76 & 33.76 \\
+\textbf{64 bytes}  & 84.50 & 15.50 & 16.50 \\
+\textbf{128 bytes} & 87.67 & 12.33 & 13.33 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Discusión y Análisis Técnico}
+
+\subsection{Impacto de la Localidad Espacial}
+Los resultados reflejan una clara correlación positiva entre el tamaño de la línea de caché y la tasa de aciertos (\textit{Hit Rate}). Al pasar de una línea de 16 bytes a una de 64 bytes, el \textit{Hit Rate} aumenta de forma notable en un \textbf{+17.26\%}, reduciendo el \textit{Miss Rate} a la mitad.
+
+Esto ocurre porque las trazas de programas reales exhiben \textbf{localidad espacial}: si un programa accede a una dirección de memoria, es altamente probable que en el futuro inmediato acceda a posiciones contiguas (por ejemplo, al recorrer arreglos o ejecutar instrucciones secuenciales). Con líneas de mayor tamaño, un solo fallo (\textit{cold miss}) carga un bloque de datos más amplio que aprovecha los accesos subsiguientes sin incurrir en nuevos fallos.
+
+\subsection{Rendimientos Marginales (De 64 bytes a 128 bytes)}
+Aunque el paso de 16 a 64 bytes ofrece un salto drástico en rendimiento, al ampliar la línea de 64 a 128 bytes el incremento en el \textit{Hit Rate} es más moderado (\textbf{+3.17\%}, pasando de 84.50\% a 87.67%).
+
+Este comportamiento ilustra el principio de rendimientos decrecientes en bloques demasiado grandes: si las líneas son excesivamente grandes (128 bytes o más), se corre el riesgo de sufrir \textbf{contaminación de caché} (\textit{cache pollution}), trayendo datos innecesarios que desplazan información útil antes de que sea reutilizada, especialmente si el programa contiene saltos frecuentes o no mantiene una localidad estrictamente secuencial.
+
+\subsection{Comportamiento del AMAT (\textit{Average Memory Access Time})}
+El tiempo medio de acceso a memoria muestra una mejora sustancial a medida que se incrementa el tamaño del bloque, descendiendo desde los \textbf{33.76 ciclos} (con 16 bytes) hasta los \textbf{13.33 ciclos} (con 128 bytes).
+
+Dado que el AMAT es directamente proporcional al \textit{Miss Rate}, la reducción drástica de los fallos compensa con creces el costo asociado de transferir bloques más grandes desde la memoria principal, validando que una organización de bloque intermedia-alta (como 64 o 128 bytes) resulta óptima para cargas de trabajo con alta localidad espacial en arquitecturas de 32 KB.
+
+\section{Conclusiones}
+\begin{enumerate}
+    \item \textbf{Configuración Óptima:} Para el patrón de carga simulado, el tamaño de línea de \textbf{64 bytes} representa un punto de equilibrio excelente entre el aprovechamiento de la localidad espacial y la eficiencia de ocupación del espacio en la caché de 32 KB.
+    \item \textbf{Efectividad del Algoritmo LRU y Coherencia:} La implementación del algoritmo de reemplazo LRU en conjunto con la estructura de conjuntos asociativos de 4 vías manejó correctamente los conflictos de direccionamiento, garantizando métricas estables y consistentes durante la ejecución en lote.
+\end{enumerate}
+
+\end{document}
